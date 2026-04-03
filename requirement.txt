@@ -1,0 +1,19 @@
+# symmetry-of-mirrors: High-Performance macOS File Manager
+## 핵심 요구사항 (CORE REQUIREMENTS)
+
+### 1. 전광석화 UI 반응성 (Instant UI Responsiveness)
+- [x] **마우스 다운(MouseDown) 즉시 선택**: 마우스 버튼을 누르는 찰나(MouseDown) 하이라이트가 시작되어야 함.
+- [x] **디커플링 포커스**: 파일 하이라이트와 창 테두리(Active Pane)의 포커스가 동시에, 지연 없이 동기화되어야 함.
+
+### 2. 맥OS 표준 조작성 (Native macOS Interaction)
+- [x] **드래그 박스 선택 (Marquee Selection)**: 빈 공간에서 드래그하여 다수의 파일을 묶음 선택할 수 있어야 함.
+- [x] **커맨드/시프트 완벽 지원**: 다중 선택 시 시스템 표준 단축키(⌘, ⇧)가 오류 없이 작동해야 함.
+- [x] **키보드 네비게이션 (Keyboard Navigation)**: 상하 화살표 키로 파일을 이동하고 선택할 수 있으며, Enter 키 등으로 폴더에 즉각 진입 가능.
+
+### 3. 풍부한 미리보기 (Rich Preview)
+- [x] **이미지 꽉 찬 보기 (Full-fit Preview)**: 이미지가 미리보기 영역에 여백 없이 가득 차도록 렌더링 최적화 완료.
+- [x] **고성능 비동기 로딩 (Async Preview)**: 프리뷰 정보가 메인 UI를 방해하지 않도록 별도 스레드에서 즉시 로드되어야 함.
+
+### 4. 아키텍처 및 확장성
+- [x] **3컬럼 미러 시스템**: 사이드바 - 좌패널 - 우패널의 고전적이며 강력한 3단 레이아웃 유지.
+- [x] **권한 관리 (Sandboxing)**: 전체 디스크 접근 권한이 없을 시 사용자에게 친절한 안내와 수동 권한 획득 기능 제공.
