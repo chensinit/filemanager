@@ -2,19 +2,12 @@ import Foundation
 import Combine
 import SwiftUI
 import AppKit // NSPasteboard 사용을 위해 추가
-import UniformTypeIdentifiers
-
-struct InternalFileDragPayload: Codable {
-    let sourcePaneID: UUID
-    let urls: [URL]
-}
-
-extension UTType {
-    static let shooneeDraggedFiles = UTType(exportedAs: "com.chensi.filemanager.dragged-files")
-}
 
 class FilePaneViewModel: ObservableObject {
     let paneID = UUID()
+    private let fileSystemService: FileSystemService
+    private let dragAndDropService: FileDragAndDropService
+    private let macSystemService: MacSystemService
     @Published var currentPath: URL
     @Published var files: [FileItem] = []
     @Published var selectedFiles: Set<FileItem> = []
@@ -24,7 +17,15 @@ class FilePaneViewModel: ObservableObject {
     @Published var isShowingNewFolderAlert: Bool = false
     @Published var newFolderName: String = "새 폴더"
     
-    init(initialPath: URL) {
+    init(
+        initialPath: URL,
+        fileSystemService: FileSystemService = FileSystemService(),
+        dragAndDropService: FileDragAndDropService = FileDragAndDropService(),
+        macSystemService: MacSystemService = MacSystemService()
+    ) {
+        self.fileSystemService = fileSystemService
+        self.dragAndDropService = dragAndDropService
+        self.macSystemService = macSystemService
         self.currentPath = initialPath
         
         // 📡 전역 파일 시스템 변화 알림 구독
@@ -50,25 +51,12 @@ class FilePaneViewModel: ObservableObject {
         let path = currentPath
         Task {
             do {
-                let keys: [URLResourceKey] = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey, .localizedNameKey]
-                let contents = try FileManager.default.contentsOfDirectory(at: path, includingPropertiesForKeys: keys, options: .skipsHiddenFiles)
-                
-                let newFiles = contents.compactMap { url -> FileItem? in
-                    let resourceValues = try? url.resourceValues(forKeys: Set(keys))
-                    return FileItem(
-                        url: url,
-                        name: resourceValues?.localizedName ?? url.lastPathComponent,
-                        isDirectory: resourceValues?.isDirectory ?? false,
-                        size: Int64(resourceValues?.fileSize ?? 0),
-                        date: resourceValues?.contentModificationDate ?? Date()
-                    )
-                }.sorted {
-                    if $0.isDirectory != $1.isDirectory { return $0.isDirectory }
-                    return $0.name.localizedStandardCompare($1.name) == .orderedAscending
-                }
+                let newFiles = try fileSystemService.loadItems(at: path)
                 
                 await MainActor.run {
                     self.files = newFiles
+                    let validSelection = Set(newFiles.filter { self.selectedFiles.contains($0) })
+                    self.selectedFiles = validSelection
                     self.isLoading = false
                 }
             } catch {
@@ -97,34 +85,20 @@ class FilePaneViewModel: ObservableObject {
     
     // 앱 실행 시 또는 필요 시 파일 접근 권한을 한 번에 얻기 위한 로직
     func requestAccess(completion: @escaping (URL) -> Void = { _ in }) {
-        let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.message = "파일 매니저 앱의 정상 작동을 위해 '홈' 또는 관리할 상위 폴더를 선택하여 접근 권한을 허용해 주세요."
-        panel.prompt = "접근 허용"
-        
-        // 초기 위치를 홈으로 설정
-        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
-        
-        if panel.runModal() == .OK {
-            if let url = panel.url {
-                navigateTo(url)
-                completion(url)
-            }
+        if let url = macSystemService.requestDirectoryAccess() {
+            navigateTo(url)
+            completion(url)
         }
     }
     
     // 시스템 설정의 '전체 디스크 접근 권한' 화면을 즉시 여는 기능
     func openSystemPrivacySettings() {
-        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!
-        NSWorkspace.shared.open(url)
+        macSystemService.openSystemPrivacySettings()
     }
     
     // 현재 실행 중인 앱 파일을 파인더에서 바로 보여주는 기능 (드래그용)
     func revealAppInFinder() {
-        let appUrl = Bundle.main.bundleURL
-        NSWorkspace.shared.activateFileViewerSelecting([appUrl])
+        macSystemService.revealAppInFinder()
     }
     
     // 파일 또는 폴더 열기 (실행)
@@ -132,8 +106,7 @@ class FilePaneViewModel: ObservableObject {
         if item.isDirectory {
             navigateTo(item.url)
         } else {
-            // macOS 시스템 기본 앱으로 실행 (압축 파일, 실행 파일 등)
-            NSWorkspace.shared.open(item.url)
+            macSystemService.openFile(item.url)
         }
     }
     
@@ -180,7 +153,7 @@ class FilePaneViewModel: ObservableObject {
                 let destURL = currentPath.appendingPathComponent(srcURL.lastPathComponent)
                 
                 // 파일 중복 확인 (잘라내기 시에도 이름 같으면 알림)
-                if FileManager.default.fileExists(atPath: destURL.path) {
+                if fileSystemService.itemExists(at: destURL) {
                     await MainActor.run {
                         self.pendingConflict = FileConflict(src: srcURL, dest: destURL, isMove: actualIsCut)
                         // TODO: 잘라내기 시의 충돌 정보도 담아야 하지만, 일단 복사와 동일하게 처리
@@ -192,12 +165,7 @@ class FilePaneViewModel: ObservableObject {
                 await performPaste(src: srcURL, dest: destURL, isCut: actualIsCut)
             }
             await MainActor.run { 
-                self.loadFiles() 
-                // 잘라내기 작업 완료 후 상태 초기화
-                if actualIsCut { self.isCutOperation = false }
-                
-                // 📡 전역 알림 발송: "파일이 옮겨졌거나 복사되었음!"
-                NotificationCenter.default.post(name: .fileSystemChanged, object: nil)
+                self.finishFileTransfer(isCut: actualIsCut)
             }
         }
     }
@@ -211,17 +179,7 @@ class FilePaneViewModel: ObservableObject {
         defer { if destAccess { currentPath.stopAccessingSecurityScopedResource() } }
         
         do {
-            if overwrite && FileManager.default.fileExists(atPath: dest.path) {
-                try FileManager.default.removeItem(at: dest)
-            }
-            
-            if isCut {
-                // ✂️ 잘라내기: 파일 이동 (Move)
-                try FileManager.default.moveItem(at: src, to: dest)
-            } else {
-                // 📋 복사: 파일 복제 (Copy)
-                try FileManager.default.copyItem(at: src, to: dest)
-            }
+            try fileSystemService.transferItem(at: src, to: dest, isMove: isCut, overwrite: overwrite)
             return (true, "")
         } catch {
             let nsError = error as NSError
@@ -240,43 +198,18 @@ class FilePaneViewModel: ObservableObject {
     }
 
     func dragProvider(for file: FileItem) -> NSItemProvider {
-        let dragURLs = draggedURLs(for: file)
-        let provider = NSItemProvider(object: file.url as NSURL)
-        provider.suggestedName = file.name
-        
-        if let data = try? JSONEncoder().encode(InternalFileDragPayload(sourcePaneID: paneID, urls: dragURLs)) {
-            provider.registerDataRepresentation(forTypeIdentifier: UTType.shooneeDraggedFiles.identifier, visibility: .all) { completion in
-                completion(data, nil)
-                return nil
-            }
-        }
-        
-        return provider
+        dragAndDropService.makeDragProvider(for: file, selectedFiles: selectedFiles, paneID: paneID)
     }
     
     func handleDroppedProviders(_ providers: [NSItemProvider]) -> Bool {
         guard !providers.isEmpty else { return false }
         
         Task {
-            if let payload = await loadInternalDragPayload(from: providers) {
-                await importDroppedURLs(payload.urls, isMove: payload.sourcePaneID != paneID)
-                return
-            }
-            
-            let urls = await loadFileURLs(from: providers)
-            guard !urls.isEmpty else { return }
-            await importDroppedURLs(urls, isMove: false)
+            guard let request = await dragAndDropService.loadDropRequest(from: providers, destinationPaneID: paneID) else { return }
+            await importDroppedURLs(request.urls, isMove: request.isMove)
         }
         
         return true
-    }
-    
-    private func draggedURLs(for file: FileItem) -> [URL] {
-        let selectedURLs = selectedFiles.map(\.url)
-        if selectedFiles.contains(file), !selectedURLs.isEmpty {
-            return selectedURLs.sorted { $0.path < $1.path }
-        }
-        return [file.url]
     }
     
     private func importDroppedURLs(_ urls: [URL], isMove: Bool) async {
@@ -289,7 +222,7 @@ class FilePaneViewModel: ObservableObject {
                 continue
             }
             
-            if FileManager.default.fileExists(atPath: destURL.path) {
+            if fileSystemService.itemExists(at: destURL) {
                 await MainActor.run {
                     self.pendingConflict = FileConflict(src: srcURL, dest: destURL, isMove: isMove)
                     self.isShowingConflictAlert = true
@@ -302,34 +235,8 @@ class FilePaneViewModel: ObservableObject {
         }
         
         await MainActor.run {
-            self.loadFiles()
-            NotificationCenter.default.post(name: .fileSystemChanged, object: nil)
+            self.finishFileTransfer(isCut: isMove)
         }
-    }
-    
-    private func loadInternalDragPayload(from providers: [NSItemProvider]) async -> InternalFileDragPayload? {
-        for provider in providers {
-            guard provider.hasItemConformingToTypeIdentifier(UTType.shooneeDraggedFiles.identifier) else { continue }
-            do {
-                let data = try await provider.loadDataRepresentation(forTypeIdentifier: UTType.shooneeDraggedFiles.identifier)
-                return try JSONDecoder().decode(InternalFileDragPayload.self, from: data)
-            } catch {
-                continue
-            }
-        }
-        return nil
-    }
-    
-    private func loadFileURLs(from providers: [NSItemProvider]) async -> [URL] {
-        var urls: [URL] = []
-        
-        for provider in providers {
-            if let url = await provider.loadFileURL() {
-                urls.append(url)
-            }
-        }
-        
-        return urls
     }
     
     // MARK: - Trash / Delete
@@ -339,19 +246,19 @@ class FilePaneViewModel: ObservableObject {
         let urls = Array(selectedFiles.map { $0.url })
         guard !urls.isEmpty else { return }
         
-        // macOS 표준 휴지통 이동 함수 (사용자가 원하면 되돌리기 가능하도록)
-        NSWorkspace.shared.recycle(urls) { (newURLs, error) in
-            if let error = error {
-                print("❌ Delete failed: \(error.localizedDescription)")
-            } else {
+        Task {
+            do {
+                try await fileSystemService.recycle(urls)
                 print("🗑 Moved \(urls.count) items to trash")
-                DispatchQueue.main.async {
+                await MainActor.run {
                     self.loadFiles()
                     self.selectedFiles = []
                     
                     // 📡 전역 알림 발송: "파일이 지워졌음!"
                     NotificationCenter.default.post(name: .fileSystemChanged, object: nil)
                 }
+            } catch {
+                print("❌ Delete failed: \(error.localizedDescription)")
             }
         }
     }
@@ -364,18 +271,8 @@ class FilePaneViewModel: ObservableObject {
     }
     
     func commitFolderCreation() {
-        let trimmedName = newFolderName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let finalName = trimmedName.isEmpty ? "새 폴더" : trimmedName
-        
-        var targetURL = currentPath.appendingPathComponent(finalName)
-        var counter = 2
-        while FileManager.default.fileExists(atPath: targetURL.path) {
-            targetURL = currentPath.appendingPathComponent("\(finalName) \(counter)")
-            counter += 1
-        }
-        
         do {
-            try FileManager.default.createDirectory(at: targetURL, withIntermediateDirectories: true, attributes: nil)
+            try fileSystemService.createFolder(named: newFolderName, in: currentPath)
             DispatchQueue.main.async {
                 self.isShowingNewFolderAlert = false
                 self.loadFiles()
@@ -387,48 +284,18 @@ class FilePaneViewModel: ObservableObject {
             }
         }
     }
+    
+    @MainActor
+    func finishFileTransfer(isCut: Bool) {
+        loadFiles()
+        if isCut {
+            isCutOperation = false
+        }
+        NotificationCenter.default.post(name: .fileSystemChanged, object: nil)
+    }
 }
 
 // MARK: - Notification Extension
 extension Notification.Name {
     static let fileSystemChanged = Notification.Name("fileSystemChanged")
-}
-
-private extension NSItemProvider {
-    func loadDataRepresentation(forTypeIdentifier typeIdentifier: String) async throws -> Data {
-        try await withCheckedThrowingContinuation { continuation in
-            _ = self.loadDataRepresentation(forTypeIdentifier: typeIdentifier) { data, error in
-                if let data {
-                    continuation.resume(returning: data)
-                } else {
-                    continuation.resume(throwing: error ?? CocoaError(.fileReadUnknown))
-                }
-            }
-        }
-    }
-    
-    func loadFileURL() async -> URL? {
-        if self.canLoadObject(ofClass: NSURL.self) {
-            do {
-                let object = try await loadNSURL()
-                return object as URL
-            } catch {
-                return nil
-            }
-        }
-        
-        return nil
-    }
-    
-    func loadNSURL() async throws -> NSURL {
-        try await withCheckedThrowingContinuation { continuation in
-            self.loadObject(ofClass: NSURL.self) { object, error in
-                if let object = object as? NSURL {
-                    continuation.resume(returning: object)
-                } else {
-                    continuation.resume(throwing: error ?? CocoaError(.coderInvalidValue))
-                }
-            }
-        }
-    }
 }
