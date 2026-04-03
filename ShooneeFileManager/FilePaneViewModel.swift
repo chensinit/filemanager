@@ -45,6 +45,7 @@ class FilePaneViewModel: ObservableObject {
     @Published var pendingConflict: FileConflict? = nil
     @Published var isShowingDeleteConfirmation = false // 삭제 확인 팝업용
     private var isCutOperation: Bool = false // '잘라내기' 상태인지 내부 기록
+    private var selectionAnchor: FileItem? = nil
     
     func loadFiles() {
         isLoading = true
@@ -57,6 +58,9 @@ class FilePaneViewModel: ObservableObject {
                     self.files = newFiles
                     let validSelection = Set(newFiles.filter { self.selectedFiles.contains($0) })
                     self.selectedFiles = validSelection
+                    if let selectionAnchor, !validSelection.contains(selectionAnchor) {
+                        self.selectionAnchor = validSelection.first
+                    }
                     self.isLoading = false
                 }
             } catch {
@@ -108,6 +112,51 @@ class FilePaneViewModel: ObservableObject {
         } else {
             macSystemService.openFile(item.url)
         }
+    }
+    
+    func clearSelection() {
+        selectedFiles = []
+        selectionAnchor = nil
+    }
+    
+    func replaceSelection(with newSelection: Set<FileItem>) {
+        selectedFiles = newSelection
+        selectionAnchor = newSelection.first
+    }
+    
+    func updateSelection(for file: FileItem, isCommandPressed: Bool, isShiftPressed: Bool) {
+        if isCommandPressed {
+            if selectedFiles.contains(file) {
+                selectedFiles.remove(file)
+            } else {
+                selectedFiles.insert(file)
+            }
+            selectionAnchor = file
+            return
+        }
+        
+        if isShiftPressed,
+           let anchor = selectionAnchor,
+           let startIdx = files.firstIndex(of: anchor),
+           let endIdx = files.firstIndex(of: file) {
+            let rangeStart = min(startIdx, endIdx)
+            let rangeEnd = max(startIdx, endIdx)
+            selectedFiles = Set(files[rangeStart...rangeEnd])
+            return
+        }
+        
+        selectedFiles = [file]
+        selectionAnchor = file
+    }
+    
+    func prepareSelectionForDrag(on file: FileItem) {
+        if selectedFiles.contains(file), !selectedFiles.isEmpty {
+            selectionAnchor = file
+            return
+        }
+        
+        selectedFiles = [file]
+        selectionAnchor = file
     }
     
     // MARK: - Clipboard Logic (Copy & Cut)

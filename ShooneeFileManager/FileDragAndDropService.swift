@@ -17,12 +17,17 @@ struct FileDropRequest {
 }
 
 struct FileDragAndDropService {
+    @MainActor
+    private static var localDragContext: LocalDragContext?
+    
+    @MainActor
     func makeDragProvider(
         for file: FileItem,
         selectedFiles: Set<FileItem>,
         paneID: UUID
     ) -> NSItemProvider {
         let dragURLs = draggedURLs(for: file, selectedFiles: selectedFiles)
+        Self.localDragContext = LocalDragContext(sourcePaneID: paneID, urls: dragURLs, startedAt: Date())
         let provider = NSItemProvider(object: file.url as NSURL)
         provider.suggestedName = file.name
         
@@ -43,6 +48,13 @@ struct FileDragAndDropService {
         from providers: [NSItemProvider],
         destinationPaneID: UUID
     ) async -> FileDropRequest? {
+        if let localContext = await matchingLocalDragContext(for: providers, destinationPaneID: destinationPaneID) {
+            return FileDropRequest(
+                urls: localContext.urls,
+                isMove: localContext.sourcePaneID != destinationPaneID
+            )
+        }
+        
         if let payload = await loadInternalDragPayload(from: providers) {
             return FileDropRequest(
                 urls: payload.urls,
@@ -63,6 +75,36 @@ struct FileDragAndDropService {
         return [file.url]
     }
     
+    @MainActor
+    private func matchingLocalDragContext(
+        for providers: [NSItemProvider],
+        destinationPaneID: UUID
+    ) async -> LocalDragContext? {
+        guard let context = Self.localDragContext else { return nil }
+        
+        // Ignore stale drags so external drops cannot accidentally reuse old app state.
+        guard Date().timeIntervalSince(context.startedAt) < 5 else {
+            Self.localDragContext = nil
+            return nil
+        }
+        
+        guard let firstProviderURL = await loadFirstFileURL(from: providers) else {
+            return nil
+        }
+        
+        guard context.sourcePaneID != destinationPaneID else {
+            return nil
+        }
+        
+        let normalizedContextURLs = Set(context.urls.map(\.standardizedFileURL))
+        guard normalizedContextURLs.contains(firstProviderURL.standardizedFileURL) else {
+            return nil
+        }
+        
+        Self.localDragContext = nil
+        return context
+    }
+    
     private func loadInternalDragPayload(from providers: [NSItemProvider]) async -> InternalFileDragPayload? {
         for provider in providers {
             guard provider.hasItemConformingToTypeIdentifier(UTType.shooneeDraggedFiles.identifier) else { continue }
@@ -71,6 +113,15 @@ struct FileDragAndDropService {
                 return try JSONDecoder().decode(InternalFileDragPayload.self, from: data)
             } catch {
                 continue
+            }
+        }
+        return nil
+    }
+    
+    private func loadFirstFileURL(from providers: [NSItemProvider]) async -> URL? {
+        for provider in providers {
+            if let url = await provider.loadFileURL() {
+                return url
             }
         }
         return nil
@@ -87,6 +138,12 @@ struct FileDragAndDropService {
         
         return urls
     }
+}
+
+private struct LocalDragContext {
+    let sourcePaneID: UUID
+    let urls: [URL]
+    let startedAt: Date
 }
 
 private extension NSItemProvider {

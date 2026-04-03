@@ -13,7 +13,7 @@ struct FilePaneView: View {
     
     @State private var pathInput: String = ""
     @State private var lastClickTime: Date = .distantPast
-    @State private var lastClickedFile: FileItem? = nil
+    @State private var lastClickedFileForOpen: FileItem? = nil
     @State private var isHandlingManualClick: Bool = false
     @State private var hasToggledThisClick: Bool = false
     
@@ -26,14 +26,16 @@ struct FilePaneView: View {
                 Color(NSColor.textBackgroundColor)
                     .onTapGesture {
                         onFocus()
-                        viewModel.selectedFiles = []
+                        viewModel.clearSelection()
                         previewManager.selectedFile = nil
                     }
                 
                 List(viewModel.files, selection: selectionBinding) { file in
                     FileRow(file: file)
                         .onDrag {
-                            viewModel.dragProvider(for: file)
+                            onFocus()
+                            viewModel.prepareSelectionForDrag(on: file)
+                            return viewModel.dragProvider(for: file)
                         }
                         .tag(file)
                         .contentShape(Rectangle())
@@ -122,7 +124,7 @@ struct FilePaneView: View {
             set: { newValue in
                 if !isHandlingManualClick {
                     DispatchQueue.main.async {
-                        viewModel.selectedFiles = newValue
+                        viewModel.replaceSelection(with: newValue)
                     }
                 }
             }
@@ -141,37 +143,20 @@ struct FilePaneView: View {
                 
                 let isCmd = NSEvent.modifierFlags.contains(.command)
                 let isShift = NSEvent.modifierFlags.contains(.shift)
-                
-                if isCmd {
-                    if viewModel.selectedFiles.contains(file) {
-                        viewModel.selectedFiles.remove(file)
-                    } else {
-                        viewModel.selectedFiles.insert(file)
-                    }
-                    lastClickedFile = file
-                } else if isShift,
-                          let anchor = lastClickedFile,
-                          let startIdx = viewModel.files.firstIndex(of: anchor),
-                          let endIdx = viewModel.files.firstIndex(of: file) {
-                    let rangeStart = min(startIdx, endIdx)
-                    let rangeEnd = max(startIdx, endIdx)
-                    viewModel.selectedFiles = Set(viewModel.files[rangeStart...rangeEnd])
-                } else {
-                    viewModel.selectedFiles = [file]
-                    lastClickedFile = file
-                }
+                viewModel.updateSelection(for: file, isCommandPressed: isCmd, isShiftPressed: isShift)
             }
             .onEnded { _ in
                 hasToggledThisClick = false
                 
                 let now = Date()
                 let interval = now.timeIntervalSince(lastClickTime)
-                if interval < 0.38 && lastClickedFile?.url == file.url {
+                if interval < 0.38 && lastClickedFileForOpen?.url == file.url {
                     viewModel.openItem(file)
                     lastClickTime = .distantPast
-                    lastClickedFile = nil
+                    lastClickedFileForOpen = nil
                 } else {
                     lastClickTime = now
+                    lastClickedFileForOpen = file
                 }
                 
                 var transaction = Transaction()
