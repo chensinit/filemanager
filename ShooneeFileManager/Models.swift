@@ -44,4 +44,5 @@ struct FileConflict: Identifiable {
     let id = UUID()
     let src: URL
     let dest: URL
+    let isMove: Bool
 }

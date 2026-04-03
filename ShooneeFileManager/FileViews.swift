@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit // NSImage 사용을 위해 필요
+import UniformTypeIdentifiers
 
 // MARK: - Sidebar View
 struct SidebarView: View {
@@ -88,6 +89,9 @@ struct FilePaneView: View {
                     }
                 )) { file in
                     FileRow(file: file)
+                        .onDrag {
+                            viewModel.dragProvider(for: file)
+                        }
                         .tag(file)
                         .contentShape(Rectangle())
                         // ⚡️ 즉시 선택 + 더블 클릭 통합 핸들러 (0ms 반응)
@@ -151,6 +155,10 @@ struct FilePaneView: View {
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden) 
                 .focused($focusedField, equals: focusTarget)
+                .onDrop(of: [UTType.fileURL.identifier, UTType.shooneeDraggedFiles.identifier], isTargeted: nil) { providers in
+                    onFocus()
+                    return viewModel.handleDroppedProviders(providers)
+                }
                 // 좌우 방향키로 패널(리스트) 간 포커스 전환
                 .onKeyPress(.leftArrow) {
                     if focusTarget == .rightPane {
@@ -204,7 +212,12 @@ struct FilePaneView: View {
         .alert("Conflict", isPresented: $viewModel.isShowingConflictAlert, presenting: viewModel.pendingConflict) { conflict in
             Button("Keep Existing", role: .cancel) { }
             Button("Replace (Overwrite)", role: .destructive) {
-                Task { await viewModel.performPaste(src: conflict.src, dest: conflict.dest, overwrite: true) }
+                Task {
+                    await viewModel.performPaste(src: conflict.src, dest: conflict.dest, isCut: conflict.isMove, overwrite: true)
+                    await MainActor.run {
+                        viewModel.loadFiles()
+                    }
+                }
             }
         } message: { Text("A file named '\($0.dest.lastPathComponent)' already exists. Do you want to replace it?") }
         // 🗑 삭제 확인 알림창
