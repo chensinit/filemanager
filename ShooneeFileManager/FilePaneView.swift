@@ -1,115 +1,83 @@
 import SwiftUI
 import AppKit
-import UniformTypeIdentifiers
 
 struct FilePaneView: View {
     @ObservedObject var viewModel: FilePaneViewModel
     let previewManager: PreviewManager
-    var isFocused: Bool
+    let pane: ActivePane
     @FocusState.Binding var focusedField: FocusField?
-    var focusTarget: FocusField
-    var onFocus: () -> Void
+    /// 패널을 활성화합니다. 경로 입력칸의 포커스는 빼앗지 않습니다.
+    var onActivate: () -> Void
     var onRequestPaneSwitch: ((ActivePane) -> Void)? = nil
-    
+
     @State private var pathInput: String = ""
-    @State private var lastClickTime: Date = .distantPast
-    @State private var lastClickedFileForOpen: FileItem? = nil
-    @State private var isHandlingManualClick: Bool = false
-    @State private var hasToggledThisClick: Bool = false
-    
+
     var body: some View {
         VStack(spacing: 0) {
             toolbarArea
-                .onTapGesture { onFocus() }
-            
-            ZStack {
-                Color(NSColor.textBackgroundColor)
-                    .onTapGesture {
-                        onFocus()
-                        viewModel.clearSelection()
-                        previewManager.selectedFile = nil
+                .onTapGesture { onActivate() }
+
+            FileTableView(
+                viewModel: viewModel,
+                onActivate: onActivate,
+                onRequestPaneSwitch: { onRequestPaneSwitch?(pane == .left ? .right : .left) }
+            )
+            .background(Color(NSColor.textBackgroundColor))
+            .overlay(alignment: .bottom) {
+                if let status = viewModel.transferStatus {
+                    HStack(spacing: 10) {
+                        ProgressView().controlSize(.small)
+                        Text(status)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer()
+                        Button("남은 항목 취소") { viewModel.cancelTransfer() }
                     }
-                
-                List(viewModel.files, selection: selectionBinding) { file in
-                    FileRow(file: file)
-                        .onDrag {
-                            onFocus()
-                            viewModel.prepareSelectionForDrag(on: file)
-                            return viewModel.dragProvider(for: file)
-                        }
-                        .tag(file)
-                        .contentShape(Rectangle())
-                        .simultaneousGesture(fileClickGesture(for: file))
-                }
-                .listStyle(.plain)
-                .scrollContentBackground(.hidden)
-                .focused($focusedField, equals: focusTarget)
-                .onDrop(of: [UTType.fileURL.identifier, UTType.shooneeDraggedFiles.identifier], isTargeted: nil) { providers in
-                    onFocus()
-                    return viewModel.handleDroppedProviders(providers)
-                }
-                .onKeyPress(.leftArrow) {
-                    if focusTarget == .rightPane {
-                        onRequestPaneSwitch?(.left)
-                        return .handled
-                    }
-                    return .ignored
-                }
-                .onKeyPress(.rightArrow) {
-                    if focusTarget == .leftPane {
-                        onRequestPaneSwitch?(.right)
-                        return .handled
-                    }
-                    return .ignored
-                }
-                .onKeyPress(.return) {
-                    if let target = viewModel.selectedFiles.first {
-                        viewModel.openItem(target)
-                        return .handled
-                    }
-                    return .ignored
+                    .padding(10)
+                    .background(.regularMaterial)
                 }
             }
-            .contentShape(Rectangle())
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in
-                        onFocus()
-                    }
-            )
             .overlay {
                 if viewModel.isLoading {
                     ProgressView()
+                } else if let loadError = viewModel.loadError {
+                    ContentUnavailableView(
+                        "폴더를 열 수 없습니다",
+                        systemImage: "exclamationmark.lock",
+                        description: Text(loadError)
+                    )
                 }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onChange(of: viewModel.selectedFiles) { _, newValue in
-            previewManager.selectedFile = newValue.first
+            previewManager.selectedFile = viewModel.firstFile(in: newValue)
         }
-        .alert("Conflict", isPresented: $viewModel.isShowingConflictAlert, presenting: viewModel.pendingConflict) { conflict in
-            Button("Keep Existing", role: .cancel) { }
-            Button("Replace (Overwrite)", role: .destructive) {
-                Task {
-                    let result = await viewModel.performPaste(src: conflict.src, dest: conflict.dest, isCut: conflict.isMove, overwrite: true)
-                    await MainActor.run {
-                        if result.success {
-                            viewModel.finishFileTransfer(isCut: conflict.isMove)
-                        }
-                    }
-                }
-            }
+        .alert("같은 이름의 항목이 있습니다", isPresented: $viewModel.isShowingConflictAlert, presenting: viewModel.pendingConflict) { _ in
+            Button("덮어쓰기", role: .destructive) { viewModel.resolveConflict(.replace) }
+            Button("건너뛰기") { viewModel.resolveConflict(.skip) }
+            Button("모두 중단", role: .cancel) { viewModel.resolveConflict(.cancel) }
         } message: {
-            Text("A file named '\($0.dest.lastPathComponent)' already exists. Do you want to replace it?")
+            Text("'\($0.dest.lastPathComponent)' 항목이 이미 있습니다. 덮어쓰면 기존 항목은 복구할 수 없습니다.")
         }
-        .alert("Trash Files", isPresented: $viewModel.isShowingDeleteConfirmation) {
-            Button("Cancel", role: .cancel) { }
-            Button("Move to Trash", role: .destructive) {
+        .alert("작업을 완료하지 못했습니다", isPresented: errorAlertBinding) {
+            Button("확인", role: .cancel) { viewModel.errorMessage = nil }
+        } message: {
+            Text(viewModel.errorMessage ?? "")
+        }
+        .alert("휴지통으로 이동", isPresented: $viewModel.isShowingDeleteConfirmation) {
+            Button("취소", role: .cancel) { }
+            Button("휴지통으로 이동", role: .destructive) {
                 viewModel.deleteSelection()
             }
         } message: {
             let count = viewModel.selectedFiles.count
-            Text("Are you sure you want to move \(count) selected item\(count > 1 ? "s" : "") to the Trash?")
+            Text("선택한 항목 \(count)개를 휴지통으로 옮길까요?")
+        }
+        .alert("이름 변경", isPresented: $viewModel.isShowingRenameAlert) {
+            TextField("이름", text: $viewModel.renameText)
+            Button("취소", role: .cancel) { }
+            Button("변경") { viewModel.commitRename() }
         }
         .alert("새 폴더 만들기", isPresented: $viewModel.isShowingNewFolderAlert) {
             TextField("새 폴더", text: $viewModel.newFolderName)
@@ -117,57 +85,18 @@ struct FilePaneView: View {
             Button("만들기") { viewModel.commitFolderCreation() }
         }
     }
-    
-    private var selectionBinding: Binding<Set<FileItem>> {
+
+    private var pathFocusTarget: FocusField {
+        pane == .left ? .leftPath : .rightPath
+    }
+
+    private var errorAlertBinding: Binding<Bool> {
         Binding(
-            get: { viewModel.selectedFiles },
-            set: { newValue in
-                if !isHandlingManualClick {
-                    DispatchQueue.main.async {
-                        viewModel.replaceSelection(with: newValue)
-                    }
-                }
-            }
+            get: { viewModel.errorMessage != nil },
+            set: { if !$0 { viewModel.errorMessage = nil } }
         )
     }
-    
-    private func fileClickGesture(for file: FileItem) -> some Gesture {
-        DragGesture(minimumDistance: 0)
-            .onChanged { _ in
-                isHandlingManualClick = true
-                
-                guard !hasToggledThisClick else { return }
-                hasToggledThisClick = true
-                
-                onFocus()
-                
-                let isCmd = NSEvent.modifierFlags.contains(.command)
-                let isShift = NSEvent.modifierFlags.contains(.shift)
-                viewModel.updateSelection(for: file, isCommandPressed: isCmd, isShiftPressed: isShift)
-            }
-            .onEnded { _ in
-                hasToggledThisClick = false
-                
-                let now = Date()
-                let interval = now.timeIntervalSince(lastClickTime)
-                if interval < 0.38 && lastClickedFileForOpen?.url == file.url {
-                    viewModel.openItem(file)
-                    lastClickTime = .distantPast
-                    lastClickedFileForOpen = nil
-                } else {
-                    lastClickTime = now
-                    lastClickedFileForOpen = file
-                }
-                
-                var transaction = Transaction()
-                transaction.animation = nil
-                withTransaction(transaction) {
-                    previewManager.selectedFile = file
-                }
-                isHandlingManualClick = false
-            }
-    }
-    
+
     private var toolbarArea: some View {
         VStack(spacing: 8) {
             HStack(spacing: 16) {
@@ -175,66 +104,89 @@ struct FilePaneView: View {
                     Image(systemName: "folder.badge.plus")
                 }
                 .help("새 폴더")
-                
+
                 Divider()
                     .frame(height: 14)
-                
+
                 Button(action: { viewModel.copySelection(isCut: false) }) {
                     Image(systemName: "doc.on.doc")
                 }
                 .help("복사")
-                
+
                 Button(action: { viewModel.copySelection(isCut: true) }) {
                     Image(systemName: "scissors")
                 }
                 .help("잘라내기")
-                
+
                 Button(action: { viewModel.pasteClipboard() }) {
                     Image(systemName: "doc.on.clipboard")
                 }
                 .help("붙여넣기")
-                
+
                 Button(action: { viewModel.isShowingDeleteConfirmation = true }) {
                     Image(systemName: "trash")
                 }
                 .help("삭제 (휴지통)")
                 .disabled(viewModel.selectedFiles.isEmpty)
-                
+
                 Spacer()
                 
-                Button(action: { }) {
-                    Image(systemName: "list.bullet")
-                }
-                .help("리스트 모드")
+                TextField("검색", text: $viewModel.searchText)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 160)
                 
-                Button(action: { }) {
-                    Image(systemName: "square.grid.2x2")
+                Button(action: { viewModel.toggleHiddenFiles() }) {
+                    Image(systemName: viewModel.showsHiddenFiles ? "eye" : "eye.slash")
                 }
-                .help("아이콘 모드")
+                .help("숨김 파일 표시 (⌘⇧.)")
             }
             .buttonStyle(.plain)
             .font(.system(size: 16))
             .foregroundColor(.secondary)
             .padding(.horizontal, 4)
-            
+
             HStack {
+                Button(action: viewModel.goBack) {
+                    Image(systemName: "chevron.left").font(.title3)
+                }
+                .buttonStyle(.plain)
+                .disabled(!viewModel.canGoBack)
+                .help("뒤로 (⌘[)")
+                
+                Button(action: viewModel.goForward) {
+                    Image(systemName: "chevron.right").font(.title3)
+                }
+                .buttonStyle(.plain)
+                .disabled(!viewModel.canGoForward)
+                .help("앞으로 (⌘])")
+                
                 Button(action: viewModel.goUp) {
                     Image(systemName: "arrow.up.circle").font(.title3)
                 }
                 .buttonStyle(.plain)
                 .disabled(viewModel.currentPath.path == "/")
-                
-                TextField("Path", text: $pathInput, onCommit: {
-                    let url = URL(fileURLWithPath: pathInput)
-                    viewModel.navigateTo(url)
-                })
+
+                // onCommit은 포커스를 잃을 때도 실행되므로 Enter에만 반응하는 onSubmit을 씁니다.
+                TextField("Path", text: $pathInput)
+                .onSubmit {
+                    if !viewModel.navigateToTypedPath(pathInput) {
+                        pathInput = viewModel.currentPath.path
+                    }
+                }
                 .textFieldStyle(.roundedBorder)
+                .focused($focusedField, equals: pathFocusTarget)
                 .onAppear { pathInput = viewModel.currentPath.path }
                 .onChange(of: viewModel.currentPath) { _, newValue in
                     pathInput = newValue.path
                 }
-                
-                Button(action: viewModel.loadFiles) {
+                .onChange(of: focusedField) { oldValue, newValue in
+                    // Enter 없이 칸을 벗어나면 입력을 취소하고 현재 경로를 표시합니다.
+                    if oldValue == pathFocusTarget && newValue != pathFocusTarget {
+                        pathInput = viewModel.currentPath.path
+                    }
+                }
+
+                Button(action: { viewModel.loadFiles() }) {
                     Image(systemName: "arrow.clockwise")
                 }
                 .buttonStyle(.plain)

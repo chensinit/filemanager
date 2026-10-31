@@ -4,7 +4,6 @@ import QuickLookThumbnailing
 
 struct PreviewArea: View {
     @ObservedObject var manager: PreviewManager
-    let width: CGFloat
     
     @State private var thumbnail: NSImage?
     @State private var fileSize: String = ""
@@ -30,9 +29,10 @@ struct PreviewArea: View {
                     }
                 }
             }
-            .frame(width: width, height: 350)
+            .frame(maxWidth: .infinity, minHeight: 80, maxHeight: 350)
             .background(Color.accentColor.opacity(0.05))
             .clipped()
+            .layoutPriority(0)
             
             Divider()
             
@@ -61,10 +61,13 @@ struct PreviewArea: View {
                             .foregroundColor(.secondary.opacity(0.4))
                     }
                 }
-                Spacer()
             }
             .padding()
-            .frame(width: width)
+            .frame(maxWidth: .infinity)
+            .fixedSize(horizontal: false, vertical: true)
+            .layoutPriority(1)
+            
+            Spacer(minLength: 0)
         }
         .padding()
         .onChange(of: manager.selectedFile) { _, newValue in

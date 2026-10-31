@@ -12,3 +12,4 @@ build/
 # Swift Package Manager
 .build/
 Package.resolved
+.claude/settings.local.json
