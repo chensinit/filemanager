@@ -41,7 +41,7 @@ struct FileTableView: NSViewRepresentable {
         table.addTableColumn(dateColumn)
         table.addTableColumn(sizeColumn)
         table.sortDescriptors = [nameColumn.sortDescriptorPrototype!]
-        
+
         let menu = NSMenu()
         menu.delegate = context.coordinator
         table.menu = menu
@@ -62,6 +62,9 @@ struct FileTableView: NSViewRepresentable {
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = false
+        // 창 도구 막대 때문에 내용 여백이 자동으로 바뀌지 않게 고정합니다.
+        scrollView.automaticallyAdjustsContentInsets = false
+        scrollView.contentInsets = NSEdgeInsetsZero
         return scrollView
     }
 
@@ -145,7 +148,7 @@ struct FileTableView: NSViewRepresentable {
                   let key = descriptor.key.flatMap(FileSortKey.init(rawValue:)) else { return }
             viewModel.setSort(key, ascending: descriptor.ascending)
         }
-        
+
         func tableViewSelectionDidChange(_ notification: Notification) {
             guard !isApplyingSelection, let table = notification.object as? NSTableView else { return }
             let selection = Set(table.selectedRowIndexes.filter { rows.indices.contains($0) }.map { rows[$0] })
@@ -171,13 +174,13 @@ struct FileTableView: NSViewRepresentable {
             proposedDropOperation dropOperation: NSTableView.DropOperation
         ) -> NSDragOperation {
             let dragged = draggedURLs(info)
-            
+
             // 폴더 행 위에 놓으면 그 폴더로 들어갑니다.
             if dropOperation == .on, rows.indices.contains(row), rows[row].opensAsFolder,
                !dragged.contains(rows[row].url) {
                 return info.draggingSource is PaneTableView ? .move : .copy
             }
-            
+
             // 같은 패널의 빈 공간으로의 드롭은 할 일이 없습니다.
             if info.draggingSource as? NSTableView === tableView { return [] }
             tableView.setDropRow(-1, dropOperation: .on)
@@ -193,32 +196,32 @@ struct FileTableView: NSViewRepresentable {
             let folder = rows.indices.contains(row) && rows[row].opensAsFolder ? rows[row].url : nil
             return viewModel.handleDrop(draggedURLs(info), isMove: info.draggingSource is PaneTableView, to: folder)
         }
-        
+
         private func draggedURLs(_ info: NSDraggingInfo) -> [URL] {
             info.draggingPasteboard.readObjects(
                 forClasses: [NSURL.self],
                 options: [.urlReadingFileURLsOnly: true]
             ) as? [URL] ?? []
         }
-        
+
         // MARK: Context Menu
-        
+
         func menuNeedsUpdate(_ menu: NSMenu) {
             menu.removeAllItems()
             guard let table = viewModel.menuTable else { return }
-            
+
             let row = table.clickedRow
             guard rows.indices.contains(row) else {
                 add("붙여넣기", #selector(pasteHere), to: menu)
                 add("새 폴더", #selector(newFolder), to: menu)
                 return
             }
-            
+
             // 선택되지 않은 행을 우클릭하면 그 행만 대상으로 삼습니다.
             if !table.selectedRowIndexes.contains(row) {
                 table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
             }
-            
+
             let selected = viewModel.selectedFiles
             add("열기", #selector(openSelection), to: menu)
             add("Finder에서 보기", #selector(revealSelection), to: menu)
@@ -236,17 +239,17 @@ struct FileTableView: NSViewRepresentable {
             menu.addItem(.separator())
             add("휴지통으로 이동", #selector(trashSelection), to: menu)
         }
-        
+
         private func add(_ title: String, _ action: Selector, to menu: NSMenu) {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
             item.target = self
             menu.addItem(item)
         }
-        
+
         private var orderedSelection: [FileItem] {
             viewModel.files.filter { viewModel.selectedFiles.contains($0) }
         }
-        
+
         @objc private func openSelection() { orderedSelection.forEach(viewModel.openItem) }
         @objc private func revealSelection() { viewModel.revealInFinder(orderedSelection) }
         @objc private func renameSelection() { viewModel.startRenaming() }
@@ -377,7 +380,7 @@ private final class FileCellView: NSTableCellView {
         label.stringValue = file.name
         icon.image = Self.icon(for: file)
     }
-    
+
     /// 파일을 직접 읽지 않고 종류로 아이콘을 고릅니다. 네트워크 폴더에서도 빠릅니다.
     private static func icon(for file: FileItem) -> NSImage {
         if file.isPackage {
@@ -388,11 +391,11 @@ private final class FileCellView: NSTableCellView {
         }
         return NSWorkspace.shared.icon(for: UTType(filenameExtension: file.url.pathExtension) ?? .data)
     }
-    
+
     func configureDate(_ file: FileItem) {
         label.stringValue = Self.dateFormatter.string(from: file.date)
     }
-    
+
     private static let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateStyle = .short

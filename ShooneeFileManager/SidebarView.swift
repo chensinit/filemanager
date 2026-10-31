@@ -77,8 +77,9 @@ struct SidebarView: View {
             Divider()
 
             PreviewArea(manager: previewManager)
-                .frame(maxHeight: .infinity)
+                .frame(minHeight: 0, maxHeight: .infinity)
                 .background(.ultraThinMaterial.opacity(0.8))
+                .clipped()
         }
         .onReceive(NotificationCenter.default.publisher(for: .addToFavorites)) { notification in
             if let url = notification.object as? URL {

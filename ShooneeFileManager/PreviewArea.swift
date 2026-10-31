@@ -4,14 +4,32 @@ import QuickLookThumbnailing
 
 struct PreviewArea: View {
     @ObservedObject var manager: PreviewManager
-    
+
     @State private var thumbnail: NSImage?
     @State private var fileSize: String = ""
     @State private var modDate: String = ""
     @State private var isCalculating: Bool = false
     @State private var loadingTask: Task<Void, Never>? = nil
-    
+
     var body: some View {
+        // 내용이 길어도 사이드바 높이를 밀어내지 않도록 스크롤 안에 둡니다.
+        // 밖으로 넘치면 창 전체 레이아웃이 위로 밀려 제목 표시줄을 침범합니다.
+        ScrollView(.vertical) {
+            content
+        }
+        .scrollBounceBehavior(.basedOnSize)
+        .onChange(of: manager.selectedFile) { _, newValue in
+            loadingTask?.cancel()
+            
+            if let file = newValue {
+                loadHighPerformancePreview(for: file)
+            } else {
+                cleanup()
+            }
+        }
+    }
+    
+    private var content: some View {
         VStack(spacing: 0) {
             ZStack {
                 if let file = manager.selectedFile {
@@ -29,13 +47,13 @@ struct PreviewArea: View {
                     }
                 }
             }
-            .frame(maxWidth: .infinity, minHeight: 80, maxHeight: 350)
+            .frame(maxWidth: .infinity)
+            .frame(height: 220)
             .background(Color.accentColor.opacity(0.05))
             .clipped()
-            .layoutPriority(0)
-            
+
             Divider()
-            
+
             VStack(spacing: 15) {
                 if let file = manager.selectedFile {
                     Text(file.name)
@@ -43,9 +61,9 @@ struct PreviewArea: View {
                         .lineLimit(2)
                         .multilineTextAlignment(.center)
                         .padding(.top, 15)
-                    
+
                     Divider()
-                    
+
                     VStack(alignment: .leading, spacing: 10) {
                         InfoRow(label: "Kind", value: file.isDirectory ? "Folder" : file.url.pathExtension.uppercased())
                         InfoRow(label: "Size", value: isCalculating ? "..." : fileSize)
@@ -64,42 +82,29 @@ struct PreviewArea: View {
             }
             .padding()
             .frame(maxWidth: .infinity)
-            .fixedSize(horizontal: false, vertical: true)
-            .layoutPriority(1)
-            
-            Spacer(minLength: 0)
         }
         .padding()
-        .onChange(of: manager.selectedFile) { _, newValue in
-            loadingTask?.cancel()
-            
-            if let file = newValue {
-                loadHighPerformancePreview(for: file)
-            } else {
-                cleanup()
-            }
-        }
     }
     
     private func loadHighPerformancePreview(for file: FileItem) {
         isCalculating = true
         thumbnail = nil
-        
+
         loadingTask = Task {
             let attr = try? FileManager.default.attributesOfItem(atPath: file.url.path)
             let size = attr?[.size] as? Int64 ?? 0
             let date = attr?[.modificationDate] as? Date ?? Date()
-            
+
             let req = QLThumbnailGenerator.Request(
                 fileAt: file.url,
                 size: CGSize(width: 400, height: 400),
                 scale: 2.0,
                 representationTypes: .thumbnail
             )
-            
+
             let generator = QLThumbnailGenerator.shared
             var fetchedThumbnail: NSImage? = nil
-            
+
             if !Task.isCancelled && !file.isDirectory {
                 do {
                     let thumb = try await generator.generateBestRepresentation(for: req)
@@ -108,7 +113,7 @@ struct PreviewArea: View {
                     fetchedThumbnail = NSImage(contentsOf: file.url)
                 }
             }
-            
+
             if !Task.isCancelled {
                 await MainActor.run {
                     withAnimation(.easeOut(duration: 0.2)) {
@@ -121,21 +126,21 @@ struct PreviewArea: View {
             }
         }
     }
-    
+
     private func cleanup() {
         thumbnail = nil
         fileSize = ""
         modDate = ""
         isCalculating = false
     }
-    
+
     private func formatSize(_ bytes: Int64) -> String {
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useAll]
         formatter.countStyle = .file
         return formatter.string(fromByteCount: bytes)
     }
-    
+
     private func formatDate(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
